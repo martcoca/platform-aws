@@ -1,0 +1,19 @@
+name: Cost guard
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject a denylisted resource
+        run: |
+          if bash scripts/cost-guard.sh tests/fixtures/plan-with-nat.json; then
+            echo "Expected the NAT Gateway fixture to be rejected." >&2
+            exit 1
+          fi
+      - name: Accept the clean fixture
+        run: bash scripts/cost-guard.sh tests/fixtures/plan-clean.json
