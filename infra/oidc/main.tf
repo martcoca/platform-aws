@@ -46,7 +46,7 @@ data "aws_iam_policy_document" "github_actions_trust" {
 
 resource "aws_iam_role" "github_actions_plan" {
   name                 = var.role_name
-  description          = "Short-lived GitHub Actions role for foundation plans and state"
+  description          = "Short-lived GitHub Actions role for platform-aws plans and state"
   assume_role_policy   = data.aws_iam_policy_document.github_actions_trust.json
   max_session_duration = 3600
 

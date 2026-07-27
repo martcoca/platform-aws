@@ -5,7 +5,7 @@ variable "aws_region" {
 
   validation {
     condition     = var.aws_region == "us-east-1"
-    error_message = "This foundation stack is fixed to us-east-1."
+    error_message = "This platform-aws stack is fixed to us-east-1."
   }
 }
 
@@ -46,7 +46,7 @@ variable "state_bucket_name" {
 variable "state_key" {
   description = "Exact S3 object key used for the T03 OpenTofu state."
   type        = string
-  default     = "foundation/tofu.tfstate"
+  default     = "platform-aws/oidc/tofu.tfstate"
 
   validation {
     condition = (
@@ -63,7 +63,7 @@ variable "state_key" {
 variable "role_name" {
   description = "Name of the GitHub Actions planning role."
   type        = string
-  default     = "github-actions-foundation-plan"
+  default     = "github-actions-platform-aws-plan"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9+=,.@_-]{1,64}$", var.role_name))
