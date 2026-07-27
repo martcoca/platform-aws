@@ -10,12 +10,22 @@ variable "aws_region" {
 }
 
 variable "github_repository" {
-  description = "GitHub repository allowed to federate, in owner/name form."
+  description = <<-EOT
+    GitHub repository allowed to federate, exactly as it appears in the OIDC `sub` claim.
+
+    GitHub may issue *immutable* subject claims that append numeric ids to both the owner
+    and the repository — `owner@1234/name@5678` rather than `owner/name`. That form is
+    resistant to name-reuse attacks: deleting a repository and recreating it under the
+    same name yields a new id and no longer matches. Prefer it where it is issued.
+
+    Confirm the value a run actually presents before trusting a guess; a mismatch fails
+    closed with "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+  EOT
   type        = string
 
   validation {
     condition     = can(regex("^[^/[:space:]]+/[^/[:space:]]+$", var.github_repository))
-    error_message = "github_repository must use the exact owner/name form."
+    error_message = "github_repository must be one owner/name pair, with no slash or whitespace inside either part."
   }
 }
 
