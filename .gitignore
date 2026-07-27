@@ -1,0 +1,7 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Real repository, account, and globally unique resource names stay local.
+config/local/
