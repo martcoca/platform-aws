@@ -15,11 +15,21 @@ jobs:
       - name: Obtain short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.2
         with:
-          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: us-east-1
           role-session-name: github-actions-identity-check
           role-duration-seconds: 900
 
-      - name: Print assumed-role identity
-        run: aws sts get-caller-identity --query Arn --output text
+      # This repository is public, so its workflow logs are public. Assert the identity
+      # instead of printing it: a raw caller-identity ARN would publish the account id,
+      # which doctrine treats as never-publish.
+      - name: Verify the federated identity
+        run: |
+          arn="$(aws sts get-caller-identity --query Arn --output text)"
+          case "$arn" in
+            *":assumed-role/github-actions-platform-aws-plan/"*)
+              echo "OK: federated as the expected role, with no stored credential" ;;
+            *)
+              echo "FAIL: unexpected identity"; exit 1 ;;
+          esac
 
