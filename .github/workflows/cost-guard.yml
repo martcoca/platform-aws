@@ -15,5 +15,11 @@ jobs:
             echo "Expected the NAT Gateway fixture to be rejected." >&2
             exit 1
           fi
+      - name: Reject a denylisted resource from plan event JSON
+        run: |
+          if bash scripts/cost-guard.sh tests/fixtures/plan-events-with-nat.jsonl; then
+            echo "Expected the NAT Gateway plan event to be rejected." >&2
+            exit 1
+          fi
       - name: Accept the clean fixture
         run: bash scripts/cost-guard.sh tests/fixtures/plan-clean.json

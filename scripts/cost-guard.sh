@@ -12,7 +12,7 @@ plan_file=$1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 denylist_file="${script_dir}/../config/cost-guard-denylist.json"
 
-if [[ ! -f "$plan_file" ]]; then
+if [[ "$plan_file" != "/dev/stdin" && "$plan_file" != "-" && ! -f "$plan_file" ]]; then
   printf 'Plan file not found: %s\n' "$plan_file" >&2
   exit 2
 fi
@@ -22,14 +22,35 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-# A replacement has both delete and create actions. It is still a creation and must
-# be denied, so match any change whose actions include "create".
+# `tofu show -json` emits one document with a resource_changes array, while
+# `tofu plan -json` emits a stream of planned_change event objects. Normalize both
+# shapes. A replacement is still a creation and must be denied.
 denied=$(jq -r --slurpfile denylist "$denylist_file" '
+  def candidates:
+    if .type == "planned_change" then
+      .change as $change
+      | {
+          address: ($change.resource.addr // $change.resource.resource_type),
+          resource_type: $change.resource.resource_type,
+          creates: (
+            ["create", "replace", "delete_then_create", "create_then_delete"]
+            | index($change.action) != null
+          )
+        }
+    else
+      .resource_changes[]?
+      | {
+          address: (.address // .type),
+          resource_type: .type,
+          creates: ((.change.actions // []) | index("create") != null)
+        }
+    end;
+
   ($denylist[0] | INDEX(.resource_type)) as $denied_types
-  | .resource_changes[]?
-  | select((.change.actions // []) | index("create"))
-  | select($denied_types[.type] != null)
-  | "Denied resource: \(.address // .type) (\($denied_types[.type].resource)): \($denied_types[.type].monthly_cost)"
+  | candidates
+  | select(.creates)
+  | select($denied_types[.resource_type] != null)
+  | "Denied resource: \(.address) (\($denied_types[.resource_type].resource)): \($denied_types[.resource_type].monthly_cost)"
 ' "$plan_file")
 
 if [[ -n "$denied" ]]; then
