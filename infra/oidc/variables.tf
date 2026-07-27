@@ -53,23 +53,6 @@ variable "state_bucket_name" {
   }
 }
 
-variable "state_key" {
-  description = "Exact S3 object key used for the T03 OpenTofu state."
-  type        = string
-  default     = "platform-aws/oidc/tofu.tfstate"
-
-  validation {
-    condition = (
-      length(var.state_key) > 0 &&
-      !startswith(var.state_key, "/") &&
-      !endswith(var.state_key, ".tflock") &&
-      !strcontains(var.state_key, "*") &&
-      !strcontains(var.state_key, "?")
-    )
-    error_message = "state_key must be one exact state object key without a leading slash, lock suffix, or wildcards."
-  }
-}
-
 variable "role_name" {
   description = "Name of the GitHub Actions planning role."
   type        = string
@@ -80,4 +63,3 @@ variable "role_name" {
     error_message = "role_name must satisfy the IAM role-name character and length limits."
   }
 }
-

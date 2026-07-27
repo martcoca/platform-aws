@@ -1,0 +1,132 @@
+name: OpenTofu plan and cost guard
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Real AWS plan guarded for cost
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_VAR_aws_region: us-east-1
+      TF_VAR_github_ref: refs/heads/main
+      TF_VAR_github_repository: ${{ secrets.AWS_GITHUB_REPOSITORY }}
+      TF_VAR_state_bucket_name: ${{ secrets.AWS_STATE_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.5
+          tofu_wrapper: false
+
+      - name: Obtain short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.2
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          role-session-name: github-actions-plan
+          role-duration-seconds: 900
+
+      - name: Initialize the encrypted, lock-enabled backend
+        working-directory: infra/oidc
+        env:
+          TF_BACKEND_BUCKET: ${{ secrets.AWS_STATE_BUCKET_NAME }}
+        run: |
+          if ! tofu init -input=false -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            >"$RUNNER_TEMP/tofu-init.log" 2>&1; then
+            echo "Backend initialization failed without publishing the state location." >&2
+            exit 1
+          fi
+
+      - name: Run the real plan through the cost guard
+        id: guarded-plan
+        working-directory: infra/oidc
+        shell: bash
+        run: |
+          verdict_file="$RUNNER_TEMP/cost-guard-verdict.md"
+          guard_output="$RUNNER_TEMP/cost-guard-output.txt"
+
+          set +e
+          tofu plan -json -input=false 2>/dev/null \
+            | bash ../../scripts/cost-guard.sh /dev/stdin >"$guard_output" 2>&1
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+
+          plan_status="${pipeline_status[0]}"
+          guard_status="${pipeline_status[1]}"
+
+          if [[ "$plan_status" -ne 0 ]]; then
+            final_status=1
+            printf '### Cost guard could not decide\n\nOpenTofu planning failed; inspect the check without publishing account or state identifiers.\n' >"$verdict_file"
+          elif [[ "$guard_status" -eq 1 ]]; then
+            final_status=1
+            {
+              printf '### Cost guard denied this plan\n\n```\n'
+              sed -n '1,40p' "$guard_output"
+              printf '```\n'
+            } >"$verdict_file"
+          elif [[ "$guard_status" -ne 0 ]]; then
+            final_status=1
+            printf '### Cost guard could not decide\n\nThe guard could not parse the plan event stream.\n' >"$verdict_file"
+          else
+            final_status=0
+            printf '### Cost guard allowed this plan\n\nNo denylisted resource creation was found.\n' >"$verdict_file"
+          fi
+
+          cat "$verdict_file" >>"$GITHUB_STEP_SUMMARY"
+          printf 'exit_code=%s\n' "$final_status" >>"$GITHUB_OUTPUT"
+          printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+
+      - name: Publish the guard verdict on the pull request
+        if: always() && steps.guarded-plan.outputs.verdict_file != ''
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          VERDICT_FILE: ${{ steps.guarded-plan.outputs.verdict_file }}
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- platform-aws-cost-guard -->";
+            const verdict = fs.readFileSync(process.env.VERDICT_FILE, "utf8");
+            const body = `${marker}\n${verdict}`;
+            const coordinates = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              coordinates,
+            );
+            const previous = comments.find(
+              (comment) =>
+                comment.user?.type === "Bot" &&
+                comment.body?.startsWith(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: coordinates.owner,
+                repo: coordinates.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({...coordinates, body});
+            }
+
+      - name: Enforce the guarded plan verdict
+        if: steps.guarded-plan.outputs.exit_code != '0'
+        run: exit 1

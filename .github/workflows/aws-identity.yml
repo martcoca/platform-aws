@@ -17,6 +17,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: us-east-1
+          mask-aws-account-id: true
           role-session-name: github-actions-identity-check
           role-duration-seconds: 900
 
@@ -32,4 +33,3 @@ jobs:
             *)
               echo "FAIL: unexpected identity"; exit 1 ;;
           esac
-
