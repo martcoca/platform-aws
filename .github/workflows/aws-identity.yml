@@ -12,6 +12,16 @@ jobs:
       id-token: write
       contents: read
     steps:
+      # Diagnostic: print only the decoded claims, never the token itself. sub/aud/ref
+      # name the repository and branch and carry no account id or secret material.
+      - name: Show the OIDC subject this run presents
+        run: |
+          tok="$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+          printf '%s' "$tok" | cut -d. -f2 \
+            | { read -r p; printf '%s' "$p==="; } | base64 -d 2>/dev/null \
+            | jq -r '{sub, aud, repository, ref, event_name, workflow_ref}'
+
       - name: Obtain short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.1.2
         with:
