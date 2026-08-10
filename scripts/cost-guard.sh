@@ -22,10 +22,36 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
+# Fail closed on anything that is not a readable plan.
+#
+# Without this the guard is trivially bypassed: a failing `tofu plan` piped into it emits
+# error events, no denied resource is found, and the guard exits 0 — so a pipeline without
+# `pipefail` reports success for a plan that never ran. "No denied resources" and "no plan"
+# must not produce the same verdict.
+plan_input=$(cat -- "$plan_file")
+
+if [[ -z "${plan_input//[[:space:]]/}" ]]; then
+  printf 'cost-guard: empty input; refusing to report a plan as clean.\n' >&2
+  exit 2
+fi
+
+if printf '%s' "$plan_input" | jq -e -s 'any(.[]; .["@level"] == "error")' >/dev/null 2>&1; then
+  printf 'cost-guard: the plan reported errors; refusing to report it as clean.\n' >&2
+  printf '%s' "$plan_input" | jq -r -s '.[] | select(.["@level"] == "error") | .["@message"]' 2>/dev/null | head -3 >&2
+  exit 2
+fi
+
+if ! printf '%s' "$plan_input" | jq -e -s '
+      any(.[]; has("resource_changes") or .type == "planned_change" or .type == "change_summary")
+    ' >/dev/null 2>&1; then
+  printf 'cost-guard: input is not recognizable OpenTofu plan output; refusing to pass it.\n' >&2
+  exit 2
+fi
+
 # `tofu show -json` emits one document with a resource_changes array, while
 # `tofu plan -json` emits a stream of planned_change event objects. Normalize both
 # shapes. A replacement is still a creation and must be denied.
-denied=$(jq -r --slurpfile denylist "$denylist_file" '
+denied=$(printf '%s' "$plan_input" | jq -r --slurpfile denylist "$denylist_file" '
   def candidates:
     if .type == "planned_change" then
       .change as $change
@@ -51,7 +77,7 @@ denied=$(jq -r --slurpfile denylist "$denylist_file" '
   | select(.creates)
   | select($denied_types[.resource_type] != null)
   | "Denied resource: \(.address) (\($denied_types[.resource_type].resource)): \($denied_types[.resource_type].monthly_cost)"
-' "$plan_file")
+')
 
 if [[ -n "$denied" ]]; then
   printf '%s\n' "$denied" >&2
