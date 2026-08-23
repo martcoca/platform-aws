@@ -1,5 +1,10 @@
 name: OpenTofu plan and cost guard
 
+# The cost guard is not in this repository. It is consumed as a pinned composite action
+# from martcoca/cost-guard, so this repository holds neither the guard nor its denylist.
+# The pin is recorded once in config/cost-guard-action.txt and asserted against every
+# `uses:` below by scripts/check-ci-contract.sh.
+
 on:
   pull_request:
 
@@ -51,51 +56,99 @@ jobs:
             exit 1
           fi
 
-      - name: Run the real plan through the cost guard
-        id: guarded-plan
+      - name: Write the plan to a file
+        id: plan
         working-directory: infra/oidc
         shell: bash
         run: |
-          verdict_file="$RUNNER_TEMP/cost-guard-verdict.md"
-          guard_output="$RUNNER_TEMP/cost-guard-output.txt"
-
-          set +e
-          tofu plan -json -input=false 2>/dev/null \
-            | bash ../../scripts/cost-guard.sh /dev/stdin >"$guard_output" 2>&1
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-
-          plan_status="${pipeline_status[0]}"
-          guard_status="${pipeline_status[1]}"
-
-          if [[ "$plan_status" -ne 0 ]]; then
-            final_status=1
-            printf '### Cost guard could not decide\n\nOpenTofu planning failed; inspect the check without publishing account or state identifiers.\n' >"$verdict_file"
-          elif [[ "$guard_status" -eq 1 ]]; then
-            final_status=1
-            {
-              printf '### Cost guard denied this plan\n\n```\n'
-              sed -n '1,40p' "$guard_output"
-              printf '```\n'
-            } >"$verdict_file"
-          elif [[ "$guard_status" -ne 0 ]]; then
-            final_status=1
-            printf '### Cost guard could not decide\n\nThe guard could not parse the plan event stream.\n' >"$verdict_file"
-          else
-            final_status=0
-            printf '### Cost guard allowed this plan\n\nNo denylisted resource creation was found.\n' >"$verdict_file"
+          set -uo pipefail
+          # The plan goes to a file and the guard is handed the path. It is deliberately
+          # not piped: `tofu plan | guard` reports the *guard's* status, so a plan that
+          # never ran reads as a clean plan. This step replaced a pipeline that had to
+          # recover both statuses out of the shell afterwards; the exit code now comes
+          # from the guard step itself, which GitHub records rather than bash rebuilds.
+          # check-ci-contract.sh forbids that pipeline shape returning to this file, and
+          # it matches on the literal names — so they do not appear here either.
+          #
+          # $RUNNER_TEMP is absolute, and it has to be. The next step is a `uses:`, and a
+          # composite action does not inherit this step's `working-directory:` the way a
+          # `run:` does — a path relative to infra/oidc would not resolve inside it.
+          tofu plan -input=false -no-color -json \
+            >"$RUNNER_TEMP/tofu-plan.json" 2>"$RUNNER_TEMP/tofu-plan.err"
+          status=$?
+          if [[ "$status" -ne 0 ]]; then
+            # stderr is not echoed: it can carry the state location, and this repository
+            # is public. The failure is the signal; the detail stays on the runner.
+            printf '### Cost guard could not decide\n\nOpenTofu planning failed; inspect the check without publishing account or state identifiers.\n' \
+              >"$RUNNER_TEMP/cost-guard-verdict.md"
+            echo "plan failure" >>"$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
 
-          cat "$verdict_file" >>"$GITHUB_STEP_SUMMARY"
-          printf 'exit_code=%s\n' "$final_status" >>"$GITHUB_OUTPUT"
-          printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+      # The gate. The action exits 0 / 1 / 2 and the step carries that exit code, so a
+      # denial and an undecidable verdict both fail the job on their own. This step gets
+      # no failure excuse, and check-ci-contract.sh forbids one here — a guard that is
+      # allowed to fail is a workflow that looks guarded and is not.
+      - name: Cost guard
+        id: cost-guard
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: ${{ runner.temp }}/tofu-plan.json
 
+      - name: Record the guard verdict
+        id: verdict
+        if: always()
+        shell: bash
+        env:
+          GUARD_OUTCOME: ${{ steps.cost-guard.outcome }}
+          GUARD_VERDICT: ${{ steps.cost-guard.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          # Reporting only. The job was already failed by the guard step if the guard
+          # failed; this must never be the thing that decides, and it must never turn a
+          # failed guard into a passing job — hence the re-assertion at the end.
+          #
+          # It is a separate step rather than a failure excuse on the guard: reading
+          # steps.cost-guard.outputs.verdict on a failed step is the natural reason to
+          # reach for one, and reaching for it there removes the gate.
+          verdict_file="$RUNNER_TEMP/cost-guard-verdict.md"
+          if [[ -z "$GUARD_OUTCOME" || "$GUARD_OUTCOME" == "skipped" ]]; then
+            if [[ ! -f "$verdict_file" ]]; then
+              printf '### Cost guard could not decide\n\nThe guard step did not run, so no plan was read.\n' >"$verdict_file"
+            fi
+            echo "undecidable" >>"$GITHUB_STEP_SUMMARY"
+            printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+            exit 1
+          fi
+          case "$GUARD_VERDICT" in
+            allow)
+              echo "allow" >>"$GITHUB_STEP_SUMMARY"
+              printf '### Cost guard allowed this plan\n\nNo denylisted resource creation was found.\n' >"$verdict_file"
+              ;;
+            deny)
+              echo "deny" >>"$GITHUB_STEP_SUMMARY"
+              # The action reports which resource was denied in its own step summary and
+              # step log; it exposes no output carrying that text, so this comment names
+              # the verdict and points at the run rather than reprinting the detail.
+              printf '### Cost guard denied this plan\n\nThe plan would create a resource type on the shared cost denylist. The guard step of this run names the resource.\n' >"$verdict_file"
+              ;;
+            *)
+              echo "undecidable" >>"$GITHUB_STEP_SUMMARY"
+              printf '### Cost guard could not decide\n\nThe guard failed closed rather than reporting an unread plan as clean.\n' >"$verdict_file"
+              ;;
+          esac
+          printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+          [[ "$GUARD_OUTCOME" == "success" ]] || exit 1
+
+      # Commenting is a courtesy, not a gate, so this one step may fail without failing
+      # the job. It is the only step in this file permitted a failure excuse, and
+      # check-ci-contract.sh asserts by line number that no other step has one.
       - name: Publish the guard verdict on the pull request
-        if: always() && steps.guarded-plan.outputs.verdict_file != ''
+        if: always() && steps.verdict.outputs.verdict_file != ''
         continue-on-error: true
         uses: actions/github-script@v7
         env:
-          VERDICT_FILE: ${{ steps.guarded-plan.outputs.verdict_file }}
+          VERDICT_FILE: ${{ steps.verdict.outputs.verdict_file }}
         with:
           script: |
             const fs = require("fs");
@@ -126,7 +179,3 @@ jobs:
             } else {
               await github.rest.issues.createComment({...coordinates, body});
             }
-
-      - name: Enforce the guarded plan verdict
-        if: steps.guarded-plan.outputs.exit_code != '0'
-        run: exit 1
