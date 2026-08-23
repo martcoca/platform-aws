@@ -18,5 +18,8 @@ Review the plan before requesting the fresh human approval required to create th
 ```sh
 tofu init
 tofu plan -var-file=../../config/local/state.tfvars -out=state.tfplan
-tofu show -json state.tfplan | ../../scripts/cost-guard.sh /dev/stdin
+tofu show -json state.tfplan >state.plan.json
 ```
+
+The cost guard is not a script in this repository; see `infra/oidc/README.md` for how to
+run the pinned released action's guard against a saved plan file by hand.

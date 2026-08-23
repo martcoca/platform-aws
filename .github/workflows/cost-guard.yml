@@ -1,5 +1,10 @@
 name: Cost guard
 
+# This repository holds no guard and no denylist. Both travel with the pinned composite
+# action, so what is asserted here is the *consumption*: that the released action still
+# gates this repository's plans the way the deleted local copy did — same six inputs, same
+# three exit outcomes — now through `uses:` rather than through `bash scripts/...`.
+
 on:
   pull_request:
   push:
@@ -9,41 +14,94 @@ on:
 # that declares nothing inherits it.
 permissions:
   contents: read
+
 jobs:
-  fixtures:
+  action-contract:
+    name: The released action gates this repository's plans
     runs-on: ubuntu-latest
+    # The five failing steps carry continue-on-error so this job can assert that they
+    # failed. A job that actually goes red cannot exist in a repository whose merge gate
+    # requires every check green, and `outcome == failure` is the same fact recorded
+    # rather than acted on. The real gate is aws-plan.yml, where the guard step has no
+    # such excuse and check-ci-contract.sh forbids one there.
     steps:
       - uses: actions/checkout@v4
-      - name: Reject a denylisted resource
+        with:
+          persist-credentials: false
+
+      - name: An empty plan file is not a clean plan
+        shell: bash
+        run: ': > "$RUNNER_TEMP/empty-plan.json"'
+
+      - name: A clean plan is allowed
+        id: clean
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: tests/fixtures/plan-clean.json
+
+      - name: A denied create fails the step
+        id: denied
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: tests/fixtures/plan-with-nat.json
+
+      - name: A denied create in event-stream form fails the step
+        id: denied-events
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: tests/fixtures/plan-events-with-nat.jsonl
+
+      - name: An errored plan fails closed
+        id: errored
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: tests/fixtures/plan-errored.jsonl
+
+      - name: Unrecognizable input fails closed
+        id: unrecognizable
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: tests/fixtures/plan-unrecognizable.txt
+
+      - name: An empty plan fails closed
+        id: empty
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.0
+        with:
+          plan: ${{ runner.temp }}/empty-plan.json
+
+      - name: Assert every outcome, including that undecidable is no softer than denied
+        shell: bash
+        env:
+          CLEAN: ${{ steps.clean.outcome }}/${{ steps.clean.outputs.verdict }}/${{ steps.clean.outputs.exit-code }}
+          DENIED: ${{ steps.denied.outcome }}/${{ steps.denied.outputs.verdict }}/${{ steps.denied.outputs.exit-code }}
+          DENIED_EVENTS: ${{ steps.denied-events.outcome }}/${{ steps.denied-events.outputs.verdict }}/${{ steps.denied-events.outputs.exit-code }}
+          ERRORED: ${{ steps.errored.outcome }}/${{ steps.errored.outputs.verdict }}/${{ steps.errored.outputs.exit-code }}
+          UNRECOGNIZABLE: ${{ steps.unrecognizable.outcome }}/${{ steps.unrecognizable.outputs.verdict }}/${{ steps.unrecognizable.outputs.exit-code }}
+          EMPTY: ${{ steps.empty.outcome }}/${{ steps.empty.outputs.verdict }}/${{ steps.empty.outputs.exit-code }}
         run: |
-          if bash scripts/cost-guard.sh tests/fixtures/plan-with-nat.json; then
-            echo "Expected the NAT Gateway fixture to be rejected." >&2
+          set -euo pipefail
+          failed=0
+          assert() {
+            local label=$1 want=$2 got=$3
+            if [[ "$got" != "$want" ]]; then
+              printf '%s: expected %s, got %s\n' "$label" "$want" "$got" >&2
+              failed=1
+            else
+              printf '%s: %s\n' "$label" "$got"
+            fi
+          }
+          assert 'clean plan'          'success/allow/0'       "$CLEAN"
+          assert 'denied create'       'failure/deny/1'        "$DENIED"
+          assert 'denied create (events)' 'failure/deny/1'     "$DENIED_EVENTS"
+          assert 'errored plan'        'failure/undecidable/2' "$ERRORED"
+          assert 'unrecognizable'      'failure/undecidable/2' "$UNRECOGNIZABLE"
+          assert 'empty plan'          'failure/undecidable/2' "$EMPTY"
+          [[ "$failed" -eq 0 ]] || {
+            printf '\nThe released action no longer gates this repository as required.\n' >&2
             exit 1
-          fi
-      - name: Reject a denylisted resource from plan event JSON
-        run: |
-          if bash scripts/cost-guard.sh tests/fixtures/plan-events-with-nat.jsonl; then
-            echo "Expected the NAT Gateway plan event to be rejected." >&2
-            exit 1
-          fi
-      - name: Accept the clean fixture
-        run: bash scripts/cost-guard.sh tests/fixtures/plan-clean.json
-      - name: Refuse a plan that reported errors
-        run: |
-          if bash scripts/cost-guard.sh tests/fixtures/plan-errored.jsonl; then
-            echo "Expected an errored plan to be refused, not reported clean." >&2
-            exit 1
-          fi
-      - name: Refuse unrecognizable input
-        run: |
-          if bash scripts/cost-guard.sh tests/fixtures/plan-unrecognizable.txt; then
-            echo "Expected unrecognizable input to be refused." >&2
-            exit 1
-          fi
-      - name: Refuse empty input
-        run: |
-          : > "$RUNNER_TEMP/empty.json"
-          if bash scripts/cost-guard.sh "$RUNNER_TEMP/empty.json"; then
-            echo "Expected empty input to be refused." >&2
-            exit 1
-          fi
+          }

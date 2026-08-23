@@ -2,6 +2,8 @@
 *.tfstate
 *.tfstate.*
 *.tfplan
+# A saved plan rendered to JSON for the cost guard is still plan output.
+*.plan.json
 
 # Real repository, account, and globally unique resource names stay local.
 config/local/
