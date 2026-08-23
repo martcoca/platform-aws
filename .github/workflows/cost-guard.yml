@@ -3,7 +3,12 @@ name: Cost guard
 on:
   pull_request:
   push:
-
+  # Required: an auto-merge push raises no events, so this must be dispatchable.
+  workflow_dispatch:
+# Least privilege, declared: the organization default is now write, and a workflow
+# that declares nothing inherits it.
+permissions:
+  contents: read
 jobs:
   fixtures:
     runs-on: ubuntu-latest
