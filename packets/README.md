@@ -8,7 +8,7 @@ Check, and enough context to execute without reading another repository.
 | # | Packet | Status | Is |
 |---|---|---|---|
 | 1 | [`0010-E01-T03.md`](0010-E01-T03.md) | done | Consume the released cost guard action and delete this repository's local copies |
-| 2 | [`0010-E01-T07.md`](0010-E01-T07.md) | not started | Anchor the contract check so a comment cannot satisfy an assertion about a real YAML line |
+| 2 | [`0010-E01-T07.md`](0010-E01-T07.md) | done | Anchor the contract check so a comment cannot satisfy an assertion about a real YAML line |
 
 Take the packet the Founder names. Otherwise take the next one in this table whose
 `Status:` is not `done`. The table is the order; the numbers are only identity.

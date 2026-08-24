@@ -1,0 +1,193 @@
+# NEGATIVE FIXTURE — this file is deliberately broken. It is not a workflow.
+#
+# It lives here so scripts/check-ci-contract.sh can prove it refuses an unguarded plan
+# rather than only prove it accepts a guarded one. A check that has never been shown
+# failing is a check nobody has tested.
+#
+# The compromise: the step header is still a real line, so anything keying off `- name:
+# Cost guard` still finds a step — but its body is commented out and it now runs `echo`.
+# This is the shape that actually got past this repository's pre-T07 check: it reported
+# "CI contract checks passed." against a plan with no guard on it at all.
+#
+name: OpenTofu plan and cost guard
+
+# The cost guard is not in this repository. It is consumed as a pinned composite action
+# from martcoca/cost-guard, so this repository holds neither the guard nor its denylist.
+# The pin is recorded once in config/cost-guard-action.txt and asserted against every
+# `uses:` below by scripts/check-ci-contract.sh.
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Real AWS plan guarded for cost
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_VAR_aws_region: us-east-1
+      TF_VAR_github_ref: refs/heads/main
+      TF_VAR_github_repository: ${{ secrets.AWS_GITHUB_REPOSITORY }}
+      TF_VAR_state_bucket_name: ${{ secrets.AWS_STATE_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.12.5
+          tofu_wrapper: false
+
+      - name: Obtain short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.2
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+          role-session-name: github-actions-plan
+          role-duration-seconds: 900
+
+      - name: Initialize the encrypted, lock-enabled backend
+        working-directory: infra/oidc
+        env:
+          TF_BACKEND_BUCKET: ${{ secrets.AWS_STATE_BUCKET_NAME }}
+        run: |
+          if ! tofu init -input=false -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            >"$RUNNER_TEMP/tofu-init.log" 2>&1; then
+            echo "Backend initialization failed without publishing the state location." >&2
+            exit 1
+          fi
+
+      - name: Write the plan to a file
+        id: plan
+        working-directory: infra/oidc
+        shell: bash
+        run: |
+          set -uo pipefail
+          # The plan goes to a file and the guard is handed the path. It is deliberately
+          # not piped: `tofu plan | guard` reports the *guard's* status, so a plan that
+          # never ran reads as a clean plan. This step replaced a pipeline that had to
+          # recover both statuses out of the shell afterwards; the exit code now comes
+          # from the guard step itself, which GitHub records rather than bash rebuilds.
+          # check-ci-contract.sh forbids that pipeline shape returning to this file, and
+          # it matches on the literal names — so they do not appear here either.
+          #
+          # $RUNNER_TEMP is absolute, and it has to be. The next step is a `uses:`, and a
+          # composite action does not inherit this step's `working-directory:` the way a
+          # `run:` does — a path relative to infra/oidc would not resolve inside it.
+          tofu plan -input=false -no-color -json \
+            >"$RUNNER_TEMP/tofu-plan.json" 2>"$RUNNER_TEMP/tofu-plan.err"
+          status=$?
+          if [[ "$status" -ne 0 ]]; then
+            # stderr is not echoed: it can carry the state location, and this repository
+            # is public. The failure is the signal; the detail stays on the runner.
+            printf '### Cost guard could not decide\n\nOpenTofu planning failed; inspect the check without publishing account or state identifiers.\n' \
+              >"$RUNNER_TEMP/cost-guard-verdict.md"
+            echo "plan failure" >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      # The gate. The action exits 0 / 1 / 2 and the step carries that exit code, so a
+      # denial and an undecidable verdict both fail the job on their own. This step gets
+      # no failure excuse, and check-ci-contract.sh forbids one here — a guard that is
+      # allowed to fail is a workflow that looks guarded and is not.
+      - name: Cost guard
+        run: echo "guard temporarily disabled"
+        #   id: cost-guard
+        #   uses: martcoca/cost-guard@v1.0.1
+        #   with:
+        #     plan: ${{ runner.temp }}/tofu-plan.json
+
+      - name: Record the guard verdict
+        id: verdict
+        if: always()
+        shell: bash
+        env:
+          GUARD_OUTCOME: ${{ steps.cost-guard.outcome }}
+          GUARD_VERDICT: ${{ steps.cost-guard.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          # Reporting only. The job was already failed by the guard step if the guard
+          # failed; this must never be the thing that decides, and it must never turn a
+          # failed guard into a passing job — hence the re-assertion at the end.
+          #
+          # It is a separate step rather than a failure excuse on the guard: reading
+          # steps.cost-guard.outputs.verdict on a failed step is the natural reason to
+          # reach for one, and reaching for it there removes the gate.
+          verdict_file="$RUNNER_TEMP/cost-guard-verdict.md"
+          if [[ -z "$GUARD_OUTCOME" || "$GUARD_OUTCOME" == "skipped" ]]; then
+            if [[ ! -f "$verdict_file" ]]; then
+              printf '### Cost guard could not decide\n\nThe guard step did not run, so no plan was read.\n' >"$verdict_file"
+            fi
+            echo "undecidable" >>"$GITHUB_STEP_SUMMARY"
+            printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+            exit 1
+          fi
+          case "$GUARD_VERDICT" in
+            allow)
+              echo "allow" >>"$GITHUB_STEP_SUMMARY"
+              printf '### Cost guard allowed this plan\n\nNo denylisted resource creation was found.\n' >"$verdict_file"
+              ;;
+            deny)
+              echo "deny" >>"$GITHUB_STEP_SUMMARY"
+              # The action reports which resource was denied in its own step summary and
+              # step log; it exposes no output carrying that text, so this comment names
+              # the verdict and points at the run rather than reprinting the detail.
+              printf '### Cost guard denied this plan\n\nThe plan would create a resource type on the shared cost denylist. The guard step of this run names the resource.\n' >"$verdict_file"
+              ;;
+            *)
+              echo "undecidable" >>"$GITHUB_STEP_SUMMARY"
+              printf '### Cost guard could not decide\n\nThe guard failed closed rather than reporting an unread plan as clean.\n' >"$verdict_file"
+              ;;
+          esac
+          printf 'verdict_file=%s\n' "$verdict_file" >>"$GITHUB_OUTPUT"
+          [[ "$GUARD_OUTCOME" == "success" ]] || exit 1
+
+      # Commenting is a courtesy, not a gate, so this one step may fail without failing
+      # the job. It is the only step in this file permitted a failure excuse, and
+      # check-ci-contract.sh asserts by line number that no other step has one.
+      - name: Publish the guard verdict on the pull request
+        if: always() && steps.verdict.outputs.verdict_file != ''
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          VERDICT_FILE: ${{ steps.verdict.outputs.verdict_file }}
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- platform-aws-cost-guard -->";
+            const verdict = fs.readFileSync(process.env.VERDICT_FILE, "utf8");
+            const body = `${marker}\n${verdict}`;
+            const coordinates = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              coordinates,
+            );
+            const previous = comments.find(
+              (comment) =>
+                comment.user?.type === "Bot" &&
+                comment.body?.startsWith(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: coordinates.owner,
+                repo: coordinates.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({...coordinates, body});
+            }
