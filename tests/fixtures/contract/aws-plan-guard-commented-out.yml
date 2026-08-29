@@ -102,7 +102,7 @@ jobs:
       # The cost guard used to run here:
       #   - name: Cost guard
       #     id: cost-guard
-      #     uses: martcoca/cost-guard@v1.0.1
+      #     uses: martcoca/cost-guard@v1.0.2
       #     with:
       #       plan: ${{ runner.temp }}/tofu-plan.json
       # Removed while debugging a runner problem; not yet put back.
