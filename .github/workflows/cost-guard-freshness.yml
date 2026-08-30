@@ -47,7 +47,7 @@ jobs:
       # on an API call none of its real work needs.
       - name: Cost guard freshness
         id: freshness
-        uses: martcoca/cost-guard/freshness@v1.0.2
+        uses: martcoca/cost-guard/freshness@v1.0.1
         with:
           pin: ${{ steps.pin.outputs.pin }}
           fail-on-stale: 'true'
