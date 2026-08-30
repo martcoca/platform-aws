@@ -30,6 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Read early, so the freshness step below has its input even when the plan fails.
+      # The pin file is the single source of the version this repository enforces; the
+      # freshness step is fed from it rather than from a literal, so there is no fourth
+      # place to update when the pin moves.
+      - name: Read the cost-guard pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'pin=%s\n' "$(tr -d '[:space:]' < config/cost-guard-action.txt)" >>"$GITHUB_OUTPUT"
+
       - name: Install OpenTofu
         uses: opentofu/setup-opentofu@v1
         with:
@@ -94,6 +105,24 @@ jobs:
         uses: martcoca/cost-guard@v1.0.2
         with:
           plan: ${{ runner.temp }}/tofu-plan.json
+
+      # Beside the guard, not inside it. The guard reads a plan file and exits 0/1/2 with
+      # no network; freshness can only be known by asking, and the two must not share a
+      # failure mode. `if: always()` because a denied plan fails the guard step above, and
+      # that is exactly when knowing the pin is stale matters most.
+      #
+      # fail-on-stale is false here on purpose: a release nobody has picked up yet must not
+      # turn every unrelated pull request red. The scheduled run in cost-guard-freshness.yml
+      # is where staleness stops being ignorable. An unknown verdict never fails the step at
+      # all, whatever this is set to — that is the action's contract, and it is why a
+      # network failure cannot fail a build whose plan is fine.
+      - name: Cost guard freshness
+        id: freshness
+        if: always()
+        uses: martcoca/cost-guard/freshness@v1.0.2
+        with:
+          pin: ${{ steps.pin.outputs.pin }}
+          fail-on-stale: 'false'
 
       - name: Record the guard verdict
         id: verdict

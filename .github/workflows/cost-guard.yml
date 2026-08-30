@@ -120,3 +120,79 @@ jobs:
             printf '\nThe released action no longer gates this repository as required.\n' >&2
             exit 1
           }
+
+  freshness-cannot-touch-the-verdict:
+    name: A broken freshness lookup changes no verdict
+    runs-on: ubuntu-latest
+    # Job-level, so the composite action's own steps inherit it: every `gh api` call the
+    # freshness action makes goes to a host that does not resolve. That is the network
+    # failure this job exists to survive, and it is the whole reason freshness is a
+    # separate action from the guard rather than another thing the guard does.
+    env:
+      GH_HOST: cost-guard-freshness.invalid
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read the cost-guard pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'pin=%s\n' "$(tr -d '[:space:]' < config/cost-guard-action.txt)" >>"$GITHUB_OUTPUT"
+
+      - name: A clean plan is still allowed while the lookup is broken
+        id: clean
+        uses: martcoca/cost-guard@v1.0.2
+        with:
+          plan: tests/fixtures/plan-clean.json
+
+      - name: A denied create still fails while the lookup is broken
+        id: denied
+        continue-on-error: true
+        uses: martcoca/cost-guard@v1.0.2
+        with:
+          plan: tests/fixtures/plan-with-nat.json
+
+      # fail-on-stale is true here to prove it is not the thing that matters: an unknown
+      # verdict does not fail the step whatever this is set to. Failing because a lookup
+      # did not happen would put a network dependency in front of work that needs none.
+      - name: Freshness reports unknown, never current
+        id: freshness
+        uses: martcoca/cost-guard/freshness@v1.0.2
+        with:
+          pin: ${{ steps.pin.outputs.pin }}
+          fail-on-stale: 'true'
+
+      - name: Assert the verdicts stand and freshness is unknown
+        shell: bash
+        env:
+          CLEAN: ${{ steps.clean.outcome }}/${{ steps.clean.outputs.verdict }}/${{ steps.clean.outputs.exit-code }}
+          DENIED: ${{ steps.denied.outcome }}/${{ steps.denied.outputs.verdict }}/${{ steps.denied.outputs.exit-code }}
+          FRESHNESS: ${{ steps.freshness.outcome }}/${{ steps.freshness.outputs.status }}
+          LATEST: ${{ steps.freshness.outputs.latest-release }}
+        run: |
+          set -euo pipefail
+          failed=0
+          assert() {
+            local label=$1 want=$2 got=$3
+            if [[ "$got" != "$want" ]]; then
+              printf '%s: expected %s, got %s\n' "$label" "$want" "$got" >&2
+              failed=1
+            else
+              printf '%s: %s\n' "$label" "$got"
+            fi
+          }
+          assert 'clean plan, lookup broken'    'success/allow/0'   "$CLEAN"
+          assert 'denied create, lookup broken' 'failure/deny/1'    "$DENIED"
+          assert 'freshness, no reachable API'  'success/unknown'   "$FRESHNESS"
+          # "could not ask" must not be dressed up as an answer.
+          if [[ -n "$LATEST" ]]; then
+            printf 'freshness named a current release (%s) with no reachable API\n' "$LATEST" >&2
+            failed=1
+          fi
+          [[ "$failed" -eq 0 ]] || {
+            printf '\nA broken freshness lookup changed a verdict, or claimed knowledge it did not have.\n' >&2
+            exit 1
+          }
