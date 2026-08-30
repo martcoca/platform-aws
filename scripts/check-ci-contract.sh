@@ -420,7 +420,12 @@ selftest() {
   # And it must not drift onto a different release from the guard. This is the case the
   # previous scanner could not see at all: it required `@` straight after `cost-guard`, so
   # a sub-action on any ref matched nothing and was reported as conforming.
-  sed 's|/cost-guard/freshness@.*$|/cost-guard/freshness@v1.0.1|' \
+  # A sentinel ref, not a real one: an earlier version of this case used @v1.0.1, which
+  # silently became a no-op the moment the repository was pinned to v1.0.1 — the drift case
+  # then drifted nothing and the self-test passed while asserting nothing. Found by pinning
+  # this repository to v1.0.1 on a scratch branch to demonstrate staleness, which is a
+  # better argument for that demonstration than the one the packet gives.
+  sed 's|/cost-guard/freshness@.*$|/cost-guard/freshness@v0.0.0-not-the-pin|' \
     .github/workflows/aws-plan.yml > "$tmp/freshness-drifted.yml"
   run_case 'freshness pinned to a different release' "$tmp/freshness-drifted.yml" 1 \
     'but the pin in'
