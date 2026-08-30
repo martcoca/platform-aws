@@ -25,6 +25,26 @@ selftest_enabled=1
 
 workflow=.github/workflows/aws-plan.yml
 demo=.github/workflows/cost-guard.yml
+fresh=.github/workflows/cost-guard-freshness.yml
+
+# Every workflow this script reasons about must exist before it starts reasoning. Without
+# this, a deleted file reaches `grep` and `awk` as a missing-file error on stderr and an
+# empty result — which reads as "the forbidden pattern is absent" and passes. The refusal
+# then comes later, from some other assertion, buried under tool noise.
+for required_workflow in \
+  "$workflow" "$demo" "$fresh" \
+  .github/workflows/guard.yml \
+  .github/workflows/aws-identity.yml \
+  .github/workflows/auto-merge.yml; do
+  [[ -f "$required_workflow" ]] || {
+    printf 'Missing %s.\n' "$required_workflow" >&2
+    case "$required_workflow" in
+      *cost-guard-freshness.yml) printf 'Nothing would report a stale pin when nobody pushes.\n' >&2 ;;
+      *aws-plan.yml)             printf 'There would be no guarded plan at all.\n' >&2 ;;
+    esac
+    exit 1
+  }
+done
 
 # Text that must appear *somewhere* in a file. Used only where the assertion really is
 # about a string occurring, not about a line existing — see require_line below.
@@ -125,20 +145,43 @@ pin_escaped=$(pin_re "$pin")
 # Anchored as a whole line: an unanchored scanner cannot tell `uses: …@main` from a
 # comment mentioning it, and refused a workflow whose guard was correctly pinned because
 # someone had left a commented-out experiment above it.
+#
+# The pattern also has to admit a *sub-action* — `owner/cost-guard/freshness@ref` — because
+# the freshness action lives in a subdirectory of the same repository and is the same
+# release. The narrower pattern this replaced required `@` straight after `cost-guard`, so
+# it matched none of the freshness lines and reported nothing about them: the freshness
+# action could have sat on a different ref, or on `@main`, and this scanner would have said
+# every use matched the pin. The comparison below is therefore on repository and ref, not
+# on the whole string.
+pin_repo="${pin%@*}"
+pin_ref="${pin##*@}"
 guard_uses=0
+freshness_uses=0
 while IFS= read -r used; do
   [[ -n "$used" ]] || continue
+  used_path="${used%@*}"
+  used_ref="${used##*@}"
+  used_repo=$(printf '%s' "$used_path" | cut -d/ -f1,2)
+  used_sub=$(printf '%s' "$used_path" | cut -d/ -f3-)
   guard_uses=$((guard_uses + 1))
-  if [[ "$used" != "$pin" ]]; then
+  [[ -n "$used_sub" ]] && freshness_uses=$((freshness_uses + 1))
+  if [[ "$used_repo" != "$pin_repo" || "$used_ref" != "$pin_ref" ]]; then
     printf 'Workflow uses %s but the pin in %s is %s.\n' "$used" "$pin_file" "$pin" >&2
     exit 1
   fi
-done < <(grep -hE '^[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._-]+/cost-guard@[^[:space:]]+[[:space:]]*$' \
+done < <(grep -hE '^[[:space:]]*uses:[[:space:]]*[A-Za-z0-9._-]+/cost-guard(/[A-Za-z0-9._-]+)*@[^[:space:]]+[[:space:]]*$' \
   .github/workflows/*.yml | sed 's/^[[:space:]]*uses:[[:space:]]*//; s/[[:space:]]*$//')
 if [[ "$guard_uses" -eq 0 ]]; then
   printf 'No workflow uses the cost-guard action.\n' >&2
   exit 1
 fi
+if [[ "$freshness_uses" -eq 0 ]]; then
+  printf 'No workflow uses the cost-guard freshness action.\n' >&2
+  printf 'A consumer with no freshness signal cannot tell it is enforcing an old denylist.\n' >&2
+  exit 1
+fi
+freshness_pin="${pin_repo}/freshness@${pin_ref}"
+freshness_escaped=$(pin_re "$freshness_pin")
 
 # --- the guarded plan hands the guard a file, and the guard still gates ---------------
 
@@ -245,7 +288,7 @@ for wf in aws-plan.yml cost-guard.yml guard.yml; do
     exit 1
   fi
 done
-for wf in aws-identity.yml auto-merge.yml; do
+for wf in aws-identity.yml auto-merge.yml cost-guard-freshness.yml; do
   if triggers_of ".github/workflows/$wf" | grep -q '^[[:space:]]*pull_request:'; then
     printf '%s gained a pull_request trigger it did not have.\n' "$wf" >&2
     exit 1
@@ -265,6 +308,59 @@ require_line "assert 'denied create' +'failure/deny/1' +\"\\\$DENIED\"" "$demo"
 require_line "assert 'errored plan' +'failure/undecidable/2' +\"\\\$ERRORED\"" "$demo"
 require_line "assert 'unrecognizable' +'failure/undecidable/2' +\"\\\$UNRECOGNIZABLE\"" "$demo"
 require_line "assert 'empty plan' +'failure/undecidable/2' +\"\\\$EMPTY\"" "$demo"
+
+# --- the pin cannot be silently behind -------------------------------------------------
+#
+# Freshness is a separate signal with a separate failure mode, and the whole point of it is
+# that it works when nobody is watching. Three things have to hold, and none is visible from
+# one file: the step runs beside the guard even when the guard failed, it does not block
+# unrelated work, and something reports staleness on a clock rather than on a push.
+
+# The pin is read from the file, never written as a literal into a `with:`. The pin file is
+# the single source; a literal here would be a fourth place to update on a bump.
+for f in "$workflow" "$fresh" "$demo"; do
+  require_line 'id: pin' "$f"
+  require_line 'printf .pin=%s\\n. "\$\(tr -d .\[:space:\]. < config/cost-guard-action\.txt\)" >>"\$GITHUB_OUTPUT"' "$f"
+  require_line "uses: ${freshness_escaped}" "$f"
+  require_line 'pin: \$\{\{ steps\.pin\.outputs\.pin \}\}' "$f"
+done
+
+# In the guarded plan: beside the guard, always run, and never blocking.
+plan_freshness=$(step_block "$workflow" 'Cost guard freshness')
+[[ -n "$plan_freshness" ]] || {
+  printf 'No "Cost guard freshness" step in %s.\n' "$workflow" >&2
+  printf 'The guarded plan would report a verdict without saying whether the guard is current.\n' >&2
+  exit 1
+}
+require_line_in 'if: always\(\)' "$plan_freshness" 'Cost guard freshness' "$workflow"
+require_line_in "uses: ${freshness_escaped}" "$plan_freshness" 'Cost guard freshness' "$workflow"
+require_line_in "fail-on-stale: 'false'" "$plan_freshness" 'Cost guard freshness' "$workflow"
+# Staleness must not turn an unrelated pull request red. This file runs on pull_request.
+require_absent "fail-on-stale: 'true'" "$workflow"
+
+# The freshness step must come after the guard step, so a denial is still the job's first
+# and loudest failure rather than being preceded by a version complaint.
+freshness_line=$(grep -nE "^[[:space:]]*uses:[[:space:]]*${freshness_escaped}[[:space:]]*\$" "$workflow" | head -n 1 | cut -d: -f1 || true)
+if [[ -z "$freshness_line" || "$freshness_line" -le "$guard_line" ]]; then
+  printf 'The freshness step must follow the guard step in %s.\n' "$workflow" >&2
+  exit 1
+fi
+
+# On the clock, and only there, staleness is not ignorable.
+require_line 'schedule:' "$fresh"
+require_line "- cron: '17 6 \* \* \*'" "$fresh"
+require_line 'workflow_dispatch:' "$fresh"
+require_line 'contents: read' "$fresh"
+require_line "fail-on-stale: 'true'" "$fresh"
+require_line '\[\[ "\$STATUS" != "behind" \]\] \|\| exit 1' "$fresh"
+# Nothing on a clock may touch infrastructure or a plan.
+require_absent 'tofu|aws-actions/configure-aws-credentials' "$fresh"
+
+# And the standing proof that a broken lookup changes no verdict.
+require "assert 'clean plan, lookup broken'    'success/allow/0'" "$demo"
+require "assert 'denied create, lookup broken' 'failure/deny/1'" "$demo"
+require "assert 'freshness, no reachable API'  'success/unknown'" "$demo"
+require_line 'GH_HOST: cost-guard-freshness\.invalid' "$demo"
 
 # --- the check must be able to refuse -------------------------------------------------
 #
@@ -327,12 +423,33 @@ selftest() {
     .github/workflows/aws-plan.yml > "$tmp/commented-unpinned.yml"
   run_case 'a commented-out unpinned uses:' "$tmp/commented-unpinned.yml" 0 ''
 
+  # The freshness step must not be removable in silence. Derived from the real workflow so
+  # it cannot go stale: drop the step and everything indented under it.
+  awk '/^      - name: Cost guard freshness$/ { drop = 1; next }
+       drop && /^      - name: / { drop = 0 }
+       !drop { print }' .github/workflows/aws-plan.yml > "$tmp/no-freshness.yml"
+  run_case 'the freshness step deleted' "$tmp/no-freshness.yml" 1 \
+    'Missing required contract line'
+
+  # And it must not drift onto a different release from the guard. This is the case the
+  # previous scanner could not see at all: it required `@` straight after `cost-guard`, so
+  # a sub-action on any ref matched nothing and was reported as conforming.
+  # A sentinel ref, not a real one: an earlier version of this case used @v1.0.1, which
+  # silently became a no-op the moment the repository was pinned to v1.0.1 — the drift case
+  # then drifted nothing and the self-test passed while asserting nothing. Found by pinning
+  # this repository to v1.0.1 on a scratch branch to demonstrate staleness, which is a
+  # better argument for that demonstration than the one the packet gives.
+  sed 's|/cost-guard/freshness@.*$|/cost-guard/freshness@v0.0.0-not-the-pin|' \
+    .github/workflows/aws-plan.yml > "$tmp/freshness-drifted.yml"
+  run_case 'freshness pinned to a different release' "$tmp/freshness-drifted.yml" 1 \
+    'but the pin in'
+
   # And the control: the untouched workflow through the same machinery, so a self-test that
   # passes by refusing everything is not mistaken for one that discriminates.
   run_case 'the real workflow, unmodified' .github/workflows/aws-plan.yml 0 ''
 
   rm -rf "$tmp"
-  printf 'Self-test: the check refuses 3 compromised workflows and accepts 2 sound ones.\n'
+  printf 'Self-test: the check refuses 5 compromised workflows and accepts 2 sound ones.\n'
 }
 
 [[ "$selftest_enabled" -eq 1 ]] && selftest

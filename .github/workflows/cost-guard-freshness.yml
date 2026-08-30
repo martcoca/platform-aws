@@ -1,0 +1,84 @@
+name: Cost guard freshness
+
+# Is this repository still enforcing the current denylist?
+#
+# The freshness step in aws-plan.yml answers that on every pull request, which is worth
+# having and is not enough: it only ever reports when somebody was already going to look at
+# a job. The repository most likely to be running a stale guard is the one nobody has
+# pushed to for a month, and that is exactly the repository where an on-push signal never
+# fires. Between v1.0.1 and v1.0.2 this repository was pinned to a guard that stalled for
+# 391 seconds on a realistic plan, and what caught it was a human noticing a slow job.
+#
+# So this runs on a clock instead, and it is the one place fail-on-stale is true. Nothing
+# here touches a plan, a verdict, or a cloud credential — a stale pin failing this workflow
+# cannot block a pull request, because this workflow never runs on one.
+
+on:
+  schedule:
+    # 06:17 UTC daily. Not on the hour: GitHub delays scheduled runs that pile up at :00,
+    # and a job whose whole value is "it ran when nobody asked" should not be queued behind
+    # everyone else's midnight cron.
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    name: The pin is not behind the current release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Read the cost-guard pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'pin=%s\n' "$(tr -d '[:space:]' < config/cost-guard-action.txt)" >>"$GITHUB_OUTPUT"
+
+      # fail-on-stale is true here and only here. This job exists to become red and stay
+      # red while the pin is behind, so the bump is owed to something rather than to
+      # somebody's memory. `unknown` still does not fail: a lookup that did not happen is
+      # not evidence of staleness, and failing on it would make this repository's CI depend
+      # on an API call none of its real work needs.
+      - name: Cost guard freshness
+        id: freshness
+        uses: martcoca/cost-guard/freshness@v1.0.2
+        with:
+          pin: ${{ steps.pin.outputs.pin }}
+          fail-on-stale: 'true'
+
+      - name: Say what to do about it
+        if: always()
+        shell: bash
+        env:
+          STATUS: ${{ steps.freshness.outputs.status }}
+          DETAIL: ${{ steps.freshness.outputs.detail }}
+          LATEST: ${{ steps.freshness.outputs.latest-release }}
+        run: |
+          set -euo pipefail
+          # Reporting only. The step above already decided; this must never be what turns a
+          # behind verdict into a passing job, so it re-asserts at the end.
+          case "$STATUS" in
+            current)
+              printf 'Pin is current. %s\n' "$DETAIL" >>"$GITHUB_STEP_SUMMARY"
+              ;;
+            behind)
+              {
+                printf '### The cost guard pin is behind\n\n%s\n\n' "$DETAIL"
+                printf 'Propagation is manual and always has been. To clear this job:\n\n'
+                printf '1. Set `config/cost-guard-action.txt` to `martcoca/cost-guard@%s`.\n' "$LATEST"
+                printf '2. Update every `uses:` of the action and of its `freshness` sub-action to that ref.\n'
+                printf '3. `scripts/check-ci-contract.sh` asserts they all match; run it before pushing.\n'
+              } >>"$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              printf 'Freshness unknown: %s. This is not a claim that the pin is current.\n' \
+                "$DETAIL" >>"$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+          [[ "$STATUS" != "behind" ]] || exit 1

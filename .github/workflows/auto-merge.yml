@@ -18,7 +18,7 @@ name: Auto-merge
 
 on:
   workflow_run:
-    workflows: ["Guard", "Cost guard", "AWS OIDC identity check", "OpenTofu plan and cost guard"]
+    workflows: ["Guard", "Cost guard", "AWS OIDC identity check", "OpenTofu plan and cost guard", "Cost guard freshness"]
     types: [completed]
 
 permissions:
