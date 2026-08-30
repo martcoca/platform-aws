@@ -25,6 +25,26 @@ selftest_enabled=1
 
 workflow=.github/workflows/aws-plan.yml
 demo=.github/workflows/cost-guard.yml
+fresh=.github/workflows/cost-guard-freshness.yml
+
+# Every workflow this script reasons about must exist before it starts reasoning. Without
+# this, a deleted file reaches `grep` and `awk` as a missing-file error on stderr and an
+# empty result — which reads as "the forbidden pattern is absent" and passes. The refusal
+# then comes later, from some other assertion, buried under tool noise.
+for required_workflow in \
+  "$workflow" "$demo" "$fresh" \
+  .github/workflows/guard.yml \
+  .github/workflows/aws-identity.yml \
+  .github/workflows/auto-merge.yml; do
+  [[ -f "$required_workflow" ]] || {
+    printf 'Missing %s.\n' "$required_workflow" >&2
+    case "$required_workflow" in
+      *cost-guard-freshness.yml) printf 'Nothing would report a stale pin when nobody pushes.\n' >&2 ;;
+      *aws-plan.yml)             printf 'There would be no guarded plan at all.\n' >&2 ;;
+    esac
+    exit 1
+  }
+done
 
 # Text that must appear *somewhere* in a file. Used only where the assertion really is
 # about a string occurring, not about a line existing — see require_line below.
@@ -295,12 +315,6 @@ require_line "assert 'empty plan' +'failure/undecidable/2' +\"\\\$EMPTY\"" "$dem
 # that it works when nobody is watching. Three things have to hold, and none is visible from
 # one file: the step runs beside the guard even when the guard failed, it does not block
 # unrelated work, and something reports staleness on a clock rather than on a push.
-
-fresh=.github/workflows/cost-guard-freshness.yml
-[[ -f "$fresh" ]] || {
-  printf 'Missing %s: nothing reports a stale pin when nobody pushes.\n' "$fresh" >&2
-  exit 1
-}
 
 # The pin is read from the file, never written as a literal into a `with:`. The pin file is
 # the single source; a literal here would be a fourth place to update on a bump.
