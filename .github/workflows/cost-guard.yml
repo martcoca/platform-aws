@@ -12,6 +12,10 @@ on:
   workflow_dispatch:
 # Least privilege, declared: the organization default is now write, and a workflow
 # that declares nothing inherits it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
