@@ -3,6 +3,10 @@ name: AWS OIDC identity check
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions: {}
 
 jobs:
