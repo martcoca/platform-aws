@@ -23,6 +23,8 @@ jobs:
   action-contract:
     name: The released action gates this repository's plans
     runs-on: ubuntu-latest
+    # A job with no cap can burn to GitHub's 6-hour default. One did: 4h19m.
+    timeout-minutes: 30
     # The five failing steps carry continue-on-error so this job can assert that they
     # failed. A job that actually goes red cannot exist in a repository whose merge gate
     # requires every check green, and `outcome == failure` is the same fact recorded
@@ -128,6 +130,8 @@ jobs:
   freshness-cannot-touch-the-verdict:
     name: A broken freshness lookup changes no verdict
     runs-on: ubuntu-latest
+    # A job with no cap can burn to GitHub's 6-hour default. One did: 4h19m.
+    timeout-minutes: 30
     # Job-level, so the composite action's own steps inherit it: every `gh api` call the
     # freshness action makes goes to a host that does not resolve. That is the network
     # failure this job exists to survive, and it is the whole reason freshness is a
