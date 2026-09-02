@@ -7,3 +7,9 @@
 
 # Real repository, account, and globally unique resource names stay local.
 config/local/
+
+# Doctrine forbids committing these. Enforced by scripts/check-ignore-contract.sh
+# after a saved plan carrying an OAuth client secret reached a public repository.
+runtime/
+*.tfvars
+.agentic/
