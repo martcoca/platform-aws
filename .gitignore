@@ -12,3 +12,4 @@ config/local/
 # after a saved plan carrying an OAuth client secret reached a public repository.
 runtime/
 *.tfvars
+.agentic/
